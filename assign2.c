@@ -46,7 +46,7 @@ int main(int argc, char *argv[]) {
   double mpi_start_time;
 
   // Variables for Cartesian topology processor grid
-  int ndims, p1, p2;
+  int ndims;
   int dims[2], coords[2], cyclic[2], reorder;
 
   // 2D-grid
@@ -65,57 +65,81 @@ int main(int argc, char *argv[]) {
   MPI_Datatype vec_type;
 
   ndims = 2;
+  dims[0] = 0;
+  dims[1] = 0;
   cyclic[0] = 0;
   cyclic[1] = 0;
   reorder = 0;
 
-  MPI_Dims_create(nproc, ndims, dims);
+  // Set sizes of tiles
+  int r1 = N / dims[0];
+  int r2 = N / dims[1];
 
   int Nx, Ny, Nt;
   double dt, dx, lambda_sq;
   double begin, end;
 
-  Nx = N;
-  Ny = N;
-  Nt = Nx;
-  dx = 1.0 / (Nx - 1);
+  Nx = N / dims[1];
+  Ny = N / dims[0];
+  Nt = N;
+  dx = 1.0 / (N - 1);
   dt = 0.50 * dx;
   lambda_sq = (dt/dx) * (dt/dx);
 
-  u = malloc(Nx*Ny*sizeof(double));
-  u_old = malloc(Nx*Ny*sizeof(double));
-  u_new = malloc(Nx*Ny*sizeof(double));
+  MPI_Dims_create(nproc, ndims, dims);
+
+  // Create Cartesian grid
+  MPI_Cart_create(MPI_COMM_WORLD, ndims, dims, cyclic, reorder, &proc_grid);
+
+  // Set my coordinates in grid
+  MPI_Cart_coords(proc_grid, rank, ndims, coords);
+
+  // Set my rank in grid
+  int my_rank;
+  MPI_Cart_rank(proc_grid, coords, &my_rank);
+
+  //printf("Grid: %d times %d\n", dims[0], dims[1]);
+
+  //printf("my_rank: %d. Coords: (%d, %d)\n", my_rank, coords[0], coords[1]);
+
+  // Create new vector type to contain vertical halo points
+  MPI_Type_vector(r1, 1, N, MPI_DOUBLE, &vec_type);
+  MPI_Type_commit(&vec_type);
+
+  u = malloc(Nx * Ny * sizeof(double));
+  u_old = malloc(Nx * Ny * sizeof(double));
+  u_new = malloc(Nx * Ny * sizeof(double));
 
   /* Setup IC */
 
-  memset(u,0,Nx*Ny*sizeof(double));
-  memset(u_old,0,Nx*Ny*sizeof(double));
-  memset(u_new,0,Nx*Ny*sizeof(double));
+  memset(u, 0, Nx * Ny * sizeof(double));
+  memset(u_old, 0, Nx * Ny * sizeof(double));
+  memset(u_new, 0, Nx * Ny * sizeof(double));
 
-  for(int i = 1; i < (Ny-1); ++i) {
-    for(int j = 1; j < (Nx-1); ++j) {
-      double x = j*dx;
-      double y = i*dx;
+  for (int i = 1; i < Ny - 1; ++i) {
+    for (int j = 1; j < Nx - 1; ++j) {
+      double x = j * dx;
+      double y = i * dx;
 
       /* u0 */
-      u[i*Nx+j] = initialize(x,y,0);
+      u[i * Nx + j] = initialize(x, y, 0);
 
       /* u1 */
-      u_new[i*Nx+j] = initialize(x,y,dt);
+      u_new[i * Nx + j] = initialize(x, y, dt);
     }
   }
 
 #ifdef WRITE_TO_FILE
-  save_solution(u_new,Ny,Nx,1);
+  save_solution(u_new, Ny, Nx, 1);
 #endif
 #ifdef VERIFY
-  double max_error=0.0;
+  double max_error = 0.0;
 #endif
 
   /* Integrate */
 
-  begin=timer();
-  for(int n=2; n<Nt; ++n) {
+  begin = timer();
+  for(int n = 2; n < Nt; ++n) {
     /* Swap ptrs */
     double *tmp = u_old;
     u_old = u;
