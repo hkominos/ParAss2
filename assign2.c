@@ -71,21 +71,6 @@ int main(int argc, char *argv[]) {
   cyclic[1] = 0;
   reorder = 0;
 
-  // Set sizes of tiles
-  int r1 = N / dims[0];
-  int r2 = N / dims[1];
-
-  int Nx, Ny, Nt;
-  double dt, dx, lambda_sq;
-  double begin, end;
-
-  Nx = N / dims[1];
-  Ny = N / dims[0];
-  Nt = N;
-  dx = 1.0 / (N - 1);
-  dt = 0.50 * dx;
-  lambda_sq = (dt/dx) * (dt/dx);
-
   MPI_Dims_create(nproc, ndims, dims);
 
   // Create Cartesian grid
@@ -102,19 +87,47 @@ int main(int argc, char *argv[]) {
 
   //printf("my_rank: %d. Coords: (%d, %d)\n", my_rank, coords[0], coords[1]);
 
-  // Create new vector type to contain vertical halo points
-  MPI_Type_vector(r1, 1, N, MPI_DOUBLE, &vec_type);
-  MPI_Type_commit(&vec_type);
+  // Static partitioning of points
+  nx_static = floor(N / dims[1]);
+  ny_static = floor(N / dims[0]);
+  mx_static = N % dims[1];
+  my_static = N % dims[0];
 
-  u = malloc(Nx * Ny * sizeof(double));
-  u_old = malloc(Nx * Ny * sizeof(double));
-  u_new = malloc(Nx * Ny * sizeof(double));
+  // Set sizes of tiles
+  int Nx = nx_static;
+  int Ny = ny_static;
+
+  if (coords[1] < mx_static) {
+  	Nx += 1;
+  }
+
+  if (coords[0] < my_static) {
+  	Ny += 1;
+  }
+
+  int Nt;
+  double dt, dx, lambda_sq;
+  double begin, end;
+
+  Nt = N;
+  dx = 1.0 / (N - 1);
+  dt = 0.50 * dx;
+  lambda_sq = (dt/dx) * (dt/dx);
+
+  // // Create new vector type to contain vertical halo points
+  // MPI_Type_vector(r1, 1, N, MPI_DOUBLE, &vec_type);
+  // MPI_Type_commit(&vec_type);
+
+  // Allocate for extended tiles
+  u = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
+  u_old = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
+  u_new = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
 
   /* Setup IC */
 
-  memset(u, 0, Nx * Ny * sizeof(double));
-  memset(u_old, 0, Nx * Ny * sizeof(double));
-  memset(u_new, 0, Nx * Ny * sizeof(double));
+  memset(u, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
+  memset(u_old, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
+  memset(u_new, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
 
   for (int i = 1; i < Ny - 1; ++i) {
     for (int j = 1; j < Nx - 1; ++j) {
