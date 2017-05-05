@@ -67,8 +67,8 @@ int main(int argc, char *argv[]) {
   ndims = 2;
   dims[0] = 0;
   dims[1] = 0;
-  cyclic[0] = 0;
-  cyclic[1] = 0;
+  cyclic[0] = 1;
+  cyclic[1] = 1;
   reorder = 0;
 
   MPI_Dims_create(nproc, ndims, dims);
@@ -88,21 +88,21 @@ int main(int argc, char *argv[]) {
   //printf("my_rank: %d. Coords: (%d, %d)\n", my_rank, coords[0], coords[1]);
 
   // Static partitioning of points
-  nx_static = floor(N / dims[1]);
-  ny_static = floor(N / dims[0]);
-  mx_static = N % dims[1];
-  my_static = N % dims[0];
+  int mx_static = N % dims[1];
+  int my_static = N % dims[0];
+  int nx_static = floor(N / dims[1]);
+  int ny_static = floor(N / dims[0]);
 
   // Set sizes of tiles
   int Nx = nx_static;
   int Ny = ny_static;
 
   if (coords[1] < mx_static) {
-  	Nx += 1;
+  	Nx = nx_static + 1;
   }
 
   if (coords[0] < my_static) {
-  	Ny += 1;
+  	Ny = ny_static + 1;
   }
 
   int Nt;
@@ -114,9 +114,9 @@ int main(int argc, char *argv[]) {
   dt = 0.50 * dx;
   lambda_sq = (dt/dx) * (dt/dx);
 
-  // // Create new vector type to contain vertical halo points
-  // MPI_Type_vector(r1, 1, N, MPI_DOUBLE, &vec_type);
-  // MPI_Type_commit(&vec_type);
+  // Create new vector type to contain vertical halo points
+  MPI_Type_vector(Ny + 2, 1, Nx + 2, MPI_DOUBLE, &vec_type);
+  MPI_Type_commit(&vec_type);
 
   // Allocate for extended tiles
   u = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
@@ -129,16 +129,27 @@ int main(int argc, char *argv[]) {
   memset(u_old, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
   memset(u_new, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
 
-  for (int i = 1; i < Ny - 1; ++i) {
-    for (int j = 1; j < Nx - 1; ++j) {
-      double x = j * dx;
-      double y = i * dx;
+  for (int i = 1; i < Ny + 1; ++i) {
+    for (int j = 1; j < Nx + 1; ++j) {
+
+    	double x = (j - 1) * dx;
+    	double y = (i - 1) * dx;
+    	if (coords[1] < mx_static) {
+    		x += coords[1] * (nx_static + 1) * dx;
+    	} else {
+    		x += (mx_static + coords[1] * nx_static) * dx;
+    	}
+    	if (coords[0] < my_static) {
+    		y += coords[0] * (ny_static + 1) * dx;
+    	} else {
+    		y += (my_static + coords[0] * ny_static) * dx;
+    	}
 
       /* u0 */
-      u[i * Nx + j] = initialize(x, y, 0);
+      u[i * (Nx + 2) + j] = initialize(x, y, 0);
 
       /* u1 */
-      u_new[i * Nx + j] = initialize(x, y, dt);
+      u_new[i * (Nx + 2) + j] = initialize(x, y, dt);
     }
   }
 
@@ -148,6 +159,18 @@ int main(int argc, char *argv[]) {
 #ifdef VERIFY
   double max_error = 0.0;
 #endif
+
+  int source;
+  int dest;
+  MPI_Cart_shift(proc_grid, 0, 1, &source, &dest);
+  //printf("my_rank: %d. S: %d, D: %d\n", my_rank, source, dest);
+  //printf("Process %d sent %f, got %f\n", my_rank, a, b);
+  MPI_Sendrecv(&u_new[Nx + 2], Nx + 2, MPI_DOUBLE, source, 111, &u_new[(Nx + 2) * (Ny + 2) - (Nx + 2)], Nx + 2, MPI_DOUBLE, dest, 111, proc_grid, &status);
+  MPI_Sendrecv(&u_new[(Nx + 2) * (Ny + 2) - 2 * (Nx + 2)], Nx + 2, MPI_DOUBLE, dest, 222, &u_new[0], Nx + 2, MPI_DOUBLE, source, 222, proc_grid, &status);
+  MPI_Cart_shift(proc_grid, 1, 1, &source, &dest);
+  //printf("my_rank: %d. S: %d, D: %d\n", my_rank, source, dest);
+  MPI_Sendrecv(&u_new[1], 1, vec_type, source, 333, &u_new[Nx + 1], 1, vec_type, dest, 333, proc_grid, &status);
+  MPI_Sendrecv(&u_new[Nx], 1, vec_type, dest, 444, &u[0], 1, vec_type, source, 444, proc_grid, &status);
 
   /* Integrate */
 
@@ -160,11 +183,11 @@ int main(int argc, char *argv[]) {
     u_new = tmp;
 
     /* Apply stencil */
-    for(int i = 1; i < (Ny-1); ++i) {
-      for(int j = 1; j < (Nx-1); ++j) {
+    for(int i = 1; i < Ny + 1; ++i) {
+      for(int j = 1; j < Nx + 1; ++j) {
 
-        u_new[i*Nx+j] = 2*u[i*Nx+j]-u_old[i*Nx+j]+lambda_sq*
-          (u[(i+1)*Nx+j] + u[(i-1)*Nx+j] + u[i*Nx+j+1] + u[i*Nx+j-1] -4*u[i*Nx+j]);
+        u_new[i*(Nx+2)+j] = 2*u[i*(Nx+2)+j]-u_old[i*(Nx+2)+j]+lambda_sq*
+          (u[(i+1)*(Nx+2)+j] + u[(i-1)*(Nx+2)+j] + u[i*(Nx+2)+j+1] + u[i*(Nx+2)+j-1] -4*u[i*(Nx+2)+j]);
       }
     }
 
@@ -188,7 +211,7 @@ int main(int argc, char *argv[]) {
   }
   end=timer();
 
-  printf("Time elapsed: %g s\n",(end-begin));
+  //printf("Time elapsed: %g s\n",(end-begin));
 
 #ifdef VERIFY
   printf("Maximum error: %g\n",max_error);
