@@ -13,8 +13,8 @@
 #include <float.h>
 #include <sys/time.h>
 
-/* #define WRITE_TO_FILE */
-/* #define VERIFY */
+//#define WRITE_TO_FILE
+//#define VERIFY
 
 double timer();
 double initialize(double x, double y, double t);
@@ -67,8 +67,8 @@ int main(int argc, char *argv[]) {
   ndims = 2;
   dims[0] = 0;
   dims[1] = 0;
-  cyclic[0] = 1;
-  cyclic[1] = 1;
+  cyclic[0] = 0;
+  cyclic[1] = 0;
   reorder = 0;
 
   MPI_Dims_create(nproc, ndims, dims);
@@ -105,6 +105,8 @@ int main(int argc, char *argv[]) {
   	Ny = ny_static + 1;
   }
 
+  //printf("my_rank: %d. Tile size: x: %d, y: %d\n", my_rank, Nx, Ny);
+
   int Nt;
   double dt, dx, lambda_sq;
   double begin, end;
@@ -114,42 +116,68 @@ int main(int argc, char *argv[]) {
   dt = 0.50 * dx;
   lambda_sq = (dt/dx) * (dt/dx);
 
+  // Set sizes of extended tiles
+  int Nx_ext = Nx;
+  int Ny_ext = Ny;
+
+  if (coords[0] != 0)
+  	Ny_ext++;
+
+  if (coords[0] != dims[0] - 1)
+  	Ny_ext++;
+
+  if (coords[1] != 0)
+  	Nx_ext++;
+
+  if (coords[1] != dims[1] - 1)
+  	Nx_ext++;
+
   // Create new vector type to contain vertical halo points
-  MPI_Type_vector(Ny + 2, 1, Nx + 2, MPI_DOUBLE, &vec_type);
+  MPI_Type_vector(Ny_ext, 1, Nx_ext, MPI_DOUBLE, &vec_type);
   MPI_Type_commit(&vec_type);
 
   // Allocate for extended tiles
-  u = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
-  u_old = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
-  u_new = malloc((Nx + 2) * (Ny + 2) * sizeof(double));
+  u = malloc(Nx_ext * Ny_ext * sizeof(double));
+  u_old = malloc(Nx_ext * Ny_ext * sizeof(double));
+  u_new = malloc(Nx_ext * Ny_ext * sizeof(double));
 
-  /* Setup IC */
+  // Setup IC
+  memset(u, 0, Nx_ext * Ny_ext * sizeof(double));
+  memset(u_old, 0, Nx_ext * Ny_ext * sizeof(double));
+  memset(u_new, 0, Nx_ext * Ny_ext * sizeof(double));
 
-  memset(u, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
-  memset(u_old, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
-  memset(u_new, 0, (Nx + 2) * (Ny + 2) * sizeof(double));
+  // Set my initial x and y values
+  double x, y;
+  if (coords[1] < mx_static) {
+    x = coords[1] * (nx_static + 1) * dx;
+  } else {
+    x = (mx_static + coords[1] * nx_static) * dx;
+  }
 
-  for (int i = 1; i < Ny + 1; ++i) {
-    for (int j = 1; j < Nx + 1; ++j) {
+  if (coords[0] < my_static) {
+    y = coords[0] * (ny_static + 1) * dx;
+  } else {
+    y = (my_static + coords[0] * ny_static) * dx;
+  }
 
-    	double x = (j - 1) * dx;
-    	double y = (i - 1) * dx;
-    	if (coords[1] < mx_static) {
-    		x += coords[1] * (nx_static + 1) * dx;
-    	} else {
-    		x += (mx_static + coords[1] * nx_static) * dx;
-    	}
-    	if (coords[0] < my_static) {
-    		y += coords[0] * (ny_static + 1) * dx;
-    	} else {
-    		y += (my_static + coords[0] * ny_static) * dx;
-    	}
+  if (coords[1] == 0)
+  	x += dx;
 
-      /* u0 */
-      u[i * (Nx + 2) + j] = initialize(x, y, 0);
+  if (coords[0] == 0)
+  	y += dx;
 
-      /* u1 */
-      u_new[i * (Nx + 2) + j] = initialize(x, y, dt);
+  //printf("my_rank: %d. initial x: %f, initial y: %f\n", my_rank, x, y);
+
+	for (int i = 1; i < Ny; i++) {
+    for (int j = 1; j < Nx; j++) {
+    	double xj = x + (j - 1) * dx;
+    	double yi = y + (i - 1) * dx;
+
+      // Set u0
+      u[i * Nx_ext + j] = initialize(xj, yi, 0);
+
+      // Set u1
+      u_new[i * Nx_ext + j] = initialize(xj, yi, dt);
     }
   }
 
@@ -160,22 +188,39 @@ int main(int argc, char *argv[]) {
   double max_error = 0.0;
 #endif
 
+  //printf("my_rank: %d. Nx_ext: %d, Ny_ext: %d\n", my_rank, Nx_ext, Ny_ext);
+
   int source;
   int dest;
   MPI_Cart_shift(proc_grid, 0, 1, &source, &dest);
   //printf("my_rank: %d. S: %d, D: %d\n", my_rank, source, dest);
-  //printf("Process %d sent %f, got %f\n", my_rank, a, b);
-  MPI_Sendrecv(&u_new[Nx + 2], Nx + 2, MPI_DOUBLE, source, 111, &u_new[(Nx + 2) * (Ny + 2) - (Nx + 2)], Nx + 2, MPI_DOUBLE, dest, 111, proc_grid, &status);
-  MPI_Sendrecv(&u_new[(Nx + 2) * (Ny + 2) - 2 * (Nx + 2)], Nx + 2, MPI_DOUBLE, dest, 222, &u_new[0], Nx + 2, MPI_DOUBLE, source, 222, proc_grid, &status);
+  if (coords[0] == 0) {
+  	MPI_Recv(&u_new[Nx_ext*Ny_ext-Nx_ext], Nx_ext, MPI_DOUBLE, dest, 111, proc_grid, &status);
+  	MPI_Send(&u_new[Nx_ext*Nx_ext-2*Nx_ext], Nx_ext, MPI_DOUBLE, dest, 222, proc_grid);
+  } else if (coords[0] == dims[0] - 1) {
+  	MPI_Send(&u_new[Nx_ext], Nx_ext, MPI_DOUBLE, source, 111, proc_grid);
+  	MPI_Recv(&u_new[0], Nx_ext, MPI_DOUBLE, source, 222, proc_grid, &status);
+  } else {
+  	MPI_Sendrecv(&u_new[Nx_ext], Nx_ext, MPI_DOUBLE, source, 111, &u_new[Nx_ext*Nx_ext-Nx_ext], Nx_ext, MPI_DOUBLE, dest, 111, proc_grid, &status);
+  	MPI_Sendrecv(&u_new[Nx_ext*Nx_ext-2*Nx_ext], Nx_ext, MPI_DOUBLE, dest, 222, &u_new[0], Nx_ext, MPI_DOUBLE, source, 222, proc_grid, &status);
+  }
+
   MPI_Cart_shift(proc_grid, 1, 1, &source, &dest);
-  //printf("my_rank: %d. S: %d, D: %d\n", my_rank, source, dest);
-  MPI_Sendrecv(&u_new[1], 1, vec_type, source, 333, &u_new[Nx + 1], 1, vec_type, dest, 333, proc_grid, &status);
-  MPI_Sendrecv(&u_new[Nx], 1, vec_type, dest, 444, &u[0], 1, vec_type, source, 444, proc_grid, &status);
+  if (coords[1] == 0) {
+  	MPI_Recv(&u_new[Nx_ext-1], 1, vec_type, dest, 333, proc_grid, &status);
+  	MPI_Send(&u_new[Nx_ext-2], 1, vec_type, dest, 444, proc_grid);
+  } else if (coords[1] == dims[1] - 1) {
+  	MPI_Send(&u_new[1], 1, vec_type, source, 333, proc_grid);
+  	MPI_Recv(&u_new[0], 1, vec_type, source, 444, proc_grid, &status);
+  } else {
+  	MPI_Sendrecv(&u_new[1], 1, vec_type, source, 333, &u_new[Nx_ext-1], 1, vec_type, dest, 333, proc_grid, &status);
+  	MPI_Sendrecv(&u_new[Nx_ext-2], 1, vec_type, dest, 444, &u_new[0], 1, vec_type, source, 444, proc_grid, &status);
+  }
 
   /* Integrate */
 
   begin = timer();
-  for(int n = 2; n < Nt; ++n) {
+  for (int n = 2; n < Nt; ++n) {
     /* Swap ptrs */
     double *tmp = u_old;
     u_old = u;
@@ -183,25 +228,39 @@ int main(int argc, char *argv[]) {
     u_new = tmp;
 
     /* Apply stencil */
-    for(int i = 1; i < Ny + 1; ++i) {
-      for(int j = 1; j < Nx + 1; ++j) {
+    for (int i = 1; i < Ny; i++) {
+      for (int j = 1; j < Nx; j++) {
 
-        u_new[i*(Nx+2)+j] = 2*u[i*(Nx+2)+j]-u_old[i*(Nx+2)+j]+lambda_sq*
-          (u[(i+1)*(Nx+2)+j] + u[(i-1)*(Nx+2)+j] + u[i*(Nx+2)+j+1] + u[i*(Nx+2)+j-1] -4*u[i*(Nx+2)+j]);
+        u_new[i*Nx_ext+j] = 2 * u[i*Nx_ext+j] - u_old[i*Nx_ext+j] + lambda_sq *
+          (u[(i-1)*Nx_ext+j] + u[(i+1)*Nx_ext+j] + u[i*Nx_ext+j+1] + u[i*Nx_ext+j-1] - 4 * u[i*Nx_ext+j]);
       }
     }
 
 #ifdef VERIFY
-    double error=0.0;
-    for(int i = 0; i < Ny; ++i) {
-      for(int j = 0; j < Nx; ++j) {
-        double e = fabs(u_new[i*Nx+j]-initialize(j*dx,i*dx,n*dt));
-        if(e>error)
+    double error = 0.0;
+    for (int i = 0; i < Ny; i++) {
+      for (int j = 0; j < Nx; j++) {
+
+      	double x = j * dx;
+    		double y = i * dx;
+    		if (coords[1] < mx_static) {
+    			x += coords[1] * (nx_static + 1) * dx;
+    		} else {
+    			x += (mx_static + coords[1] * nx_static) * dx;
+    		}
+    		if (coords[0] < my_static) {
+    			y += coords[0] * (ny_static + 1) * dx;
+    		} else {
+    			y += (my_static + coords[0] * ny_static) * dx;
+    		}
+
+        double e = fabs(u_new[i*Nx_ext+j] - initialize(x, y, n * dt));
+        if(e > error)
           error = e;
       }
     }
     if(error > max_error)
-      max_error=error;
+      max_error = error;
 #endif
 
 #ifdef WRITE_TO_FILE
@@ -209,12 +268,15 @@ int main(int argc, char *argv[]) {
 #endif
 
   }
-  end=timer();
+  end = timer();
 
-  //printf("Time elapsed: %g s\n",(end-begin));
+  printf("Time elapsed: %g s\n", end - begin);
 
 #ifdef VERIFY
-  printf("Maximum error: %g\n",max_error);
+  double glob_error;
+  MPI_Reduce(&max_error, &glob_error, 1, MPI_DOUBLE, MPI_MAX, 0, proc_grid);
+  if (my_rank == 0)
+  	printf("Global maximum error: %g\n", glob_error);
 #endif
 
   free(u);
@@ -240,10 +302,10 @@ double initialize(double x, double y, double t)
   double value = 0;
 #ifdef VERIFY
   /* standing wave */
-  value=sin(3*M_PI*x)*sin(4*M_PI*y)*cos(5*M_PI*t);
+  value = sin(3*M_PI*x) * sin(4*M_PI*y) * cos(5*M_PI*t);
 #else
   /* squared-cosine hump */
-  const double width=0.1;
+  const double width = 0.1;
 
   double centerx = 0.25;
   double centery = 0.5;
