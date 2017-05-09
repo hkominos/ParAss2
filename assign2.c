@@ -14,7 +14,7 @@
 #include <sys/time.h>
 
 //#define WRITE_TO_FILE
-//#define VERIFY
+#define VERIFY
 
 double timer();
 double initialize(double x, double y, double t);
@@ -43,6 +43,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Time variable
+  double time_measure;
   double mpi_start_time;
 
   // Variables for Cartesian topology processor grid
@@ -51,9 +52,6 @@ int main(int argc, char *argv[]) {
 
   // 2D-grid
   MPI_Comm proc_grid;
-
-  // MPI request variables
-  MPI_Request send_request, recv_request;
 
   // MPI status variable
   MPI_Status status;
@@ -105,11 +103,8 @@ int main(int argc, char *argv[]) {
   	Ny = ny_static + 1;
   }
 
-  //printf("my_rank: %d. Tile size: x: %d, y: %d\n", my_rank, Nx, Ny);
-
   int Nt;
   double dt, dx, lambda_sq;
-  double begin, end;
 
   Nt = N;
   dx = 1.0 / (N - 1);
@@ -141,7 +136,7 @@ int main(int argc, char *argv[]) {
   u_old = malloc(Nx_ext * Ny_ext * sizeof(double));
   u_new = malloc(Nx_ext * Ny_ext * sizeof(double));
 
-  // Setup IC
+  // Setup intitial conditions
   memset(u, 0, Nx_ext * Ny_ext * sizeof(double));
   memset(u_old, 0, Nx_ext * Ny_ext * sizeof(double));
   memset(u_new, 0, Nx_ext * Ny_ext * sizeof(double));
@@ -168,8 +163,8 @@ int main(int argc, char *argv[]) {
 
   //printf("my_rank: %d. initial x: %f, initial y: %f\n", my_rank, x, y);
 
-	for (int i = 1; i < Ny; i++) {
-    for (int j = 1; j < Nx; j++) {
+	for (int i = 1; i < Ny_ext - 1; i++) {
+    for (int j = 1; j < Nx_ext - 1; j++) {
     	double xj = x + (j - 1) * dx;
     	double yi = y + (i - 1) * dx;
 
@@ -188,49 +183,62 @@ int main(int argc, char *argv[]) {
   double max_error = 0.0;
 #endif
 
-  //printf("my_rank: %d. Nx_ext: %d, Ny_ext: %d\n", my_rank, Nx_ext, Ny_ext);
+  // for (int i = 0; i < Ny_ext; i++) {
+  // 	printf("my_rank: %d. ", my_rank);
+  // 	for (int j = 0; j < Nx_ext; j++) {
+  // 		printf("%f, ", u[i*Nx_ext+j]);
+  // 	}
+  // 	printf("\n");
+  // }
 
-  int source;
-  int dest;
-  MPI_Cart_shift(proc_grid, 0, 1, &source, &dest);
-  //printf("my_rank: %d. S: %d, D: %d\n", my_rank, source, dest);
-  if (coords[0] == 0) {
-  	MPI_Recv(&u_new[Nx_ext*Ny_ext-Nx_ext], Nx_ext, MPI_DOUBLE, dest, 111, proc_grid, &status);
-  	MPI_Send(&u_new[Nx_ext*Nx_ext-2*Nx_ext], Nx_ext, MPI_DOUBLE, dest, 222, proc_grid);
-  } else if (coords[0] == dims[0] - 1) {
-  	MPI_Send(&u_new[Nx_ext], Nx_ext, MPI_DOUBLE, source, 111, proc_grid);
-  	MPI_Recv(&u_new[0], Nx_ext, MPI_DOUBLE, source, 222, proc_grid, &status);
-  } else {
-  	MPI_Sendrecv(&u_new[Nx_ext], Nx_ext, MPI_DOUBLE, source, 111, &u_new[Nx_ext*Nx_ext-Nx_ext], Nx_ext, MPI_DOUBLE, dest, 111, proc_grid, &status);
-  	MPI_Sendrecv(&u_new[Nx_ext*Nx_ext-2*Nx_ext], Nx_ext, MPI_DOUBLE, dest, 222, &u_new[0], Nx_ext, MPI_DOUBLE, source, 222, proc_grid, &status);
-  }
+  // Start time measurement
+  if (rank == 0) {
+  	time_measure = timer();
+		mpi_start_time = MPI_Wtime();
+	}
 
-  MPI_Cart_shift(proc_grid, 1, 1, &source, &dest);
-  if (coords[1] == 0) {
-  	MPI_Recv(&u_new[Nx_ext-1], 1, vec_type, dest, 333, proc_grid, &status);
-  	MPI_Send(&u_new[Nx_ext-2], 1, vec_type, dest, 444, proc_grid);
-  } else if (coords[1] == dims[1] - 1) {
-  	MPI_Send(&u_new[1], 1, vec_type, source, 333, proc_grid);
-  	MPI_Recv(&u_new[0], 1, vec_type, source, 444, proc_grid, &status);
-  } else {
-  	MPI_Sendrecv(&u_new[1], 1, vec_type, source, 333, &u_new[Nx_ext-1], 1, vec_type, dest, 333, proc_grid, &status);
-  	MPI_Sendrecv(&u_new[Nx_ext-2], 1, vec_type, dest, 444, &u_new[0], 1, vec_type, source, 444, proc_grid, &status);
-  }
-
-  /* Integrate */
-
-  begin = timer();
-  for (int n = 2; n < Nt; ++n) {
-    /* Swap ptrs */
+	// Start integration
+  for (int n = 2; n < Nt; n++) {
+    // Swap pointers
     double *tmp = u_old;
     u_old = u;
     u = u_new;
     u_new = tmp;
 
-    /* Apply stencil */
-    for (int i = 1; i < Ny; i++) {
-      for (int j = 1; j < Nx; j++) {
+    int source;
+  	int dest;
 
+  	// Call for shift source and destination
+  	MPI_Cart_shift(proc_grid, 0, 1, &source, &dest);
+
+  	// Send up and receive from below and send down and receive from above, respectively
+  	if (coords[0] == 0) {
+  		MPI_Recv(&u[Nx_ext*Ny_ext-Nx_ext], Nx_ext, MPI_DOUBLE, dest, 111, proc_grid, &status);
+  		MPI_Send(&u[Nx_ext*Ny_ext-2*Nx_ext], Nx_ext, MPI_DOUBLE, dest, 222, proc_grid);
+  	} else if (coords[0] == dims[0] - 1) {
+  		MPI_Send(&u[Nx_ext], Nx_ext, MPI_DOUBLE, source, 111, proc_grid);
+  		MPI_Recv(&u[0], Nx_ext, MPI_DOUBLE, source, 222, proc_grid, &status);
+  	} else {
+  		MPI_Sendrecv(&u[Nx_ext], Nx_ext, MPI_DOUBLE, source, 111, &u[Nx_ext*Ny_ext-Nx_ext], Nx_ext, MPI_DOUBLE, dest, 111, proc_grid, &status);
+  		MPI_Sendrecv(&u[Nx_ext*Ny_ext-2*Nx_ext], Nx_ext, MPI_DOUBLE, dest, 222, &u[0], Nx_ext, MPI_DOUBLE, source, 222, proc_grid, &status);
+  	}
+
+  	// Send right and receive from left and send left and receive from right, respectively
+  	MPI_Cart_shift(proc_grid, 1, 1, &source, &dest);
+  	if (coords[1] == 0) {
+  		MPI_Recv(&u[Nx_ext-1], 1, vec_type, dest, 333, proc_grid, &status);
+  		MPI_Send(&u[Nx_ext-2], 1, vec_type, dest, 444, proc_grid);
+  	} else if (coords[1] == dims[1] - 1) {
+  		MPI_Send(&u[1], 1, vec_type, source, 333, proc_grid);
+  		MPI_Recv(&u[0], 1, vec_type, source, 444, proc_grid, &status);
+  	} else {
+  		MPI_Sendrecv(&u[1], 1, vec_type, source, 333, &u[Nx_ext-1], 1, vec_type, dest, 333, proc_grid, &status);
+  		MPI_Sendrecv(&u[Nx_ext-2], 1, vec_type, dest, 444, &u[0], 1, vec_type, source, 444, proc_grid, &status);
+  	}
+
+    // Apply stencil
+    for (int i = 1; i < Ny_ext - 1; i++) {
+      for (int j = 1; j < Nx_ext - 1; j++) {
         u_new[i*Nx_ext+j] = 2 * u[i*Nx_ext+j] - u_old[i*Nx_ext+j] + lambda_sq *
           (u[(i-1)*Nx_ext+j] + u[(i+1)*Nx_ext+j] + u[i*Nx_ext+j+1] + u[i*Nx_ext+j-1] - 4 * u[i*Nx_ext+j]);
       }
@@ -238,23 +246,14 @@ int main(int argc, char *argv[]) {
 
 #ifdef VERIFY
     double error = 0.0;
-    for (int i = 0; i < Ny; i++) {
-      for (int j = 0; j < Nx; j++) {
+    for (int i = 1; i < Ny_ext - 1; i++) {
+      for (int j = 1; j < Nx_ext - 1; j++) {
+      	
+    		double xj = x + (j - 1) * dx;
+    		double yi = y + (i - 1) * dx;
 
-      	double x = j * dx;
-    		double y = i * dx;
-    		if (coords[1] < mx_static) {
-    			x += coords[1] * (nx_static + 1) * dx;
-    		} else {
-    			x += (mx_static + coords[1] * nx_static) * dx;
-    		}
-    		if (coords[0] < my_static) {
-    			y += coords[0] * (ny_static + 1) * dx;
-    		} else {
-    			y += (my_static + coords[0] * ny_static) * dx;
-    		}
+        double e = fabs(u_new[i*Nx_ext+j] - initialize(xj, yi, n * dt));
 
-        double e = fabs(u_new[i*Nx_ext+j] - initialize(x, y, n * dt));
         if(e > error)
           error = e;
       }
@@ -264,18 +263,22 @@ int main(int argc, char *argv[]) {
 #endif
 
 #ifdef WRITE_TO_FILE
-    save_solution(u_new,Ny,Nx,n);
+    save_solution(u_new, Ny, Nx, n);
 #endif
 
   }
-  end = timer();
 
-  printf("Time elapsed: %g s\n", end - begin);
+  if (rank == 0) {
+		time_measure = timer() - time_measure;
+		double mpi_elapsed_time = MPI_Wtime() - mpi_start_time;
+		printf("Time: %f s\n", time_measure);
+		printf("MPI Wall time: %f s\n", mpi_elapsed_time);
+	}
 
 #ifdef VERIFY
   double glob_error;
-  MPI_Reduce(&max_error, &glob_error, 1, MPI_DOUBLE, MPI_MAX, 0, proc_grid);
-  if (my_rank == 0)
+  MPI_Reduce(&max_error, &glob_error, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  if (rank == 0)
   	printf("Global maximum error: %g\n", glob_error);
 #endif
 
